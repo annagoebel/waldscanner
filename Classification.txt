@@ -1,0 +1,621 @@
+
+// ----------------------------------------------------------------------------------------
+// Import FeatureCollections
+// ----------------------------------------------------------------------------------------
+
+var rlp = ee.FeatureCollection("projects/ee-annagoebel/assets/RLP");
+var gemeinden = ee.FeatureCollection("projects/ee-annagoebel/assets/Gemeinden");
+var fa = ee.FeatureCollection("projects/ee-annagoebel/assets/Forstaemter");
+var laubnadelwald = ee.FeatureCollection("projects/ee-annagoebel/assets/Reinbestand220509_1_5K");
+var wald_gesamt = ee.FeatureCollection("projects/ee-annagoebel/assets/ATKIS_wald");
+var LWI_valid = ee.FeatureCollection("projects/ee-annagoebel/assets/LWI_Reinbestand_3000");
+
+
+// ----------------------------------------------------------------------------------------
+// GUI
+// ----------------------------------------------------------------------------------------
+
+//clear root, add Map
+ui.root.clear();
+var karte = ui.Map();
+ui.root.add(karte);
+
+// Zoom auf RLP
+karte.centerObject(rlp, 8);
+
+var ndvi;
+var tc;
+var VI = {
+  'NDVI': ndvi,
+  'TC': tc
+};
+var selectVI = ui.Select({
+  style: {width: '480px'},
+  items: Object.keys(VI),
+  placeholder: 'Wählen Sie einen VI aus...',
+  
+});
+
+var rf;
+var cart;
+var gtb;
+var MLA = {
+  'RF': rf,
+  'CART': cart, 
+  'GTB': gtb
+};
+var selectMLA = ui.Select({
+  style: {width: '480px'},
+  items: Object.keys(MLA),
+  placeholder: 'Wählen Sie einen MLA aus...',
+  
+});
+
+var berechnen = ui.Button({
+  style: {width: '480px'},
+  label: "starte Auswertung"
+});
+
+var hauptpanel = ui.Panel({
+  widgets:[
+    ui.Label({value: 'Auswertung', style: {fontWeight: 'bold', fontSize: '20px'}}),
+    selectVI, 
+    selectMLA, 
+    berechnen
+  ],
+  
+  style: {width: '500px',  border: '1px solid black'}
+});
+
+// Definition der Zeitpunkte zum Filtern der S2 Szene
+var yearFile = [
+    {year:"2018", startDate:"2018-02-15", endDate:"2018-04-30"}, 
+    {year:"2019", startDate:"2019-02-15", endDate:"2019-04-30"}, 
+    {year:"2020", startDate:"2020-02-15", endDate:"2020-03-31"}, 
+    {year:"2021", startDate:"2021-03-15", endDate:"2021-03-31"}, 
+    {year:"2022", startDate:"2022-02-15", endDate:"2022-03-10"}, 
+];
+var img;
+var img2;
+var result_OA;
+var nameVI;
+var nameMLA;
+var bands2;
+
+// Auswahl des Features
+berechnen.onClick(function() {
+  // Classification über alle Jahre hinweg, Füllen des dataTable für chart
+  for (var i = 0; i < yearFile.length; i++){
+    
+    if (selectVI.getValue() == "NDVI"){
+      bands2 = ['NDVI'];
+      nameVI = "NDVI";
+      img = calculateS2(yearFile[i].startDate, yearFile[i].endDate, yearFile[i].year);
+      img2 = img.map(calculateNDVI);
+    } else {
+      bands2 = ['brightness','greenness', 'wetness'];
+      nameVI = "Tasseled Cap";
+      img = calculateS2(yearFile[i].startDate, yearFile[i].endDate, yearFile[i].year);
+      img2 = img.map(calculateTC);
+      karte.addLayer(img2, [], 'TC'+yearFile[i].year , true);
+      
+    }
+    
+    if (selectMLA.getValue() == "RF"){
+      nameMLA = "Random Forest";
+      result_OA = calculateRF(img2, yearFile[i].year);
+
+    } else if (selectMLA.getValue() == "CART"){
+      nameMLA = "Classification and Regression Trees";
+      result_OA = calculateCART(img2, yearFile[i].year);
+    } else {
+      nameMLA = "Gradient Tree Boost";
+      result_OA = calculateGTB(img2, yearFile[i].year);
+    }
+    // print table 
+    dataTable[i+1] = [
+      yearFile[i].year,
+      result_OA
+    ];
+    print(dataTable);
+  }
+  
+  var dataTableNew = [
+    [dataTable[1][0], dataTable[2][0], dataTable[3][0], dataTable[4][0], dataTable[5][0]], 
+    [dataTable[1][1], dataTable[2][1], dataTable[3][1], dataTable[4][1], dataTable[5][1]], 
+  ];
+
+  var x = ee.List(ee.List(dataTableNew).get(0));
+  var y = ee.List(ee.List(dataTableNew).get(1));
+  //var yCart = ee.List(ee.List(dataTableRF).get(2));
+  //var yGTB = ee.List(ee.List(dataTableRF).get(2));
+  
+  var chart = ui.Chart.array.values({array: y, axis: 0, xLabels: x}).setChartType('ColumnChart').setOptions({
+    title: nameVI + " / " + nameMLA, 
+    hAxis: {title: 'years'},
+    vAxis: {title: 'overall accuracy'},
+    legend: {position: 'none'}
+  });
+  hauptpanel.add(chart);
+  
+  
+});
+
+
+ui.root.add(hauptpanel);
+
+
+// ----------------------------------------------------------------------------------------
+// Sentinel-2 ImageCollections
+// ----------------------------------------------------------------------------------------
+
+function calculateS2 (startDate, endDate, year) {
+  
+  // Definiere Sentinel ImageCollection
+  var bands = ['B2', 'B3', 'B4','B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12', 'SCL'];
+  
+  var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
+            .filterDate(startDate, endDate)
+            .filterBounds(rlp)
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',40))
+            .select(bands)
+            .map(function(image){return image.clipToCollection(rlp)});
+  
+  // ----------------------------------------------------------------------------------------
+  // Wolkenmaske
+  // ----------------------------------------------------------------------------------------
+  
+  function maskCloudAndShadowsS2(image) {
+    var scl = image.select('SCL'); 
+      var darkArea = scl.eq(2);
+      var shadow = scl.eq(3); // 3 = Wolkenschatten
+      var cloudsLowProbability =  scl.eq(7); //
+      var cloudsMediumProbability =  scl.eq(8); //
+      var cloudsHighProbability =  scl.eq(9); //
+      var cirrus = scl.eq(10); // 10 = Cirrus
+      var SnowIce = scl.eq(11);
+    var mask = (darkArea.neq(1)).and(shadow.neq(1)).and(cloudsLowProbability.neq(1))
+      .and(cloudsMediumProbability.neq(1)).and(cloudsHighProbability.neq(1)).and(cirrus.neq(1))
+      .and(SnowIce.neq(1));
+    return image.updateMask(mask);
+  }
+  
+  var s2masked = s2.map(maskCloudAndShadowsS2);
+  return s2masked;
+}  
+  
+
+
+
+
+
+// Berechnung tasseled cap
+var calculateTC = function (image){
+  var b = image.select("B2", "B3", "B4", "B8A", "B11", "B12");
+  var brightness_coefficents= ee.Image([0.3037, 0.2793, 0.4743, 0.5585, 0.5082, 0.1863]);
+  var greenness_coefficents= ee.Image([-0.2848, -0.2435, -0.5436, 0.7243, 0.0840, -0.1800]);
+  var wetness_coefficents= ee.Image([0.1509, 0.1973, 0.3279, 0.3406, -0.7112, -0.4572]);
+  
+  var brightness = image.expression(
+    '(B * BRIGHTNESS)',
+    {'B':b, 'BRIGHTNESS': brightness_coefficents}
+  );
+  var greenness = image.expression(
+    '(B * GREENNESS)',
+    {'B':b, 'GREENNESS': greenness_coefficents}
+  );
+  var wetness = image.expression(
+    '(B * WETNESS)',
+    {'B':b, 'WETNESS': wetness_coefficents}
+  );
+  
+  brightness = brightness.reduce(ee.call("Reducer.sum"));
+  greenness = greenness.reduce(ee.call("Reducer.sum"));
+  wetness = wetness.reduce(ee.call("Reducer.sum"));
+    
+  var tasseled_cap = ee.Image(brightness).addBands(greenness).addBands(wetness).rename('brightness','greenness','wetness');
+  
+  
+  
+  return tasseled_cap;
+};
+
+
+//Berechnung NDVI
+var calculateNDVI = function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return image.addBands(ndvi);
+};
+
+
+
+// definition dataTable
+var dataTable = [
+  [{label: 'Jahr', role: 'domain', type: 'string'}, 
+  {label: 'OA', role: 'data', type: 'number'}]
+
+];
+
+
+//implementation array for rlp featureCollection properties
+var fc = ee.FeatureCollection([]);
+var yearsArray = [];
+var OA = [];
+  
+/*
+var dataTable = [
+  [{label: 'Jahr', role: 'domain', type: 'string'}],
+  [label: 'RF_OA', role: 'data', type: 'number'],
+  [label: 'RF_kappa', role: 'data', type: 'number'],
+  [label: 'RF_CA', role: 'data', type: 'number'],
+  [label: 'RF_PA', role: 'data', type: 'number'],
+  [label: 'CART_OA', role: 'data', type: 'number'],
+  [label: 'CART_kappa', role: 'data', type: 'number'],
+  [label: 'CART_CA', role: 'data', type: 'number'],
+  [label: 'CART_PA', role: 'data', type: 'number'],
+  [label: 'GTB_OA', role: 'data', type: 'number'],
+  [label: 'GTB_kappa', role: 'data', type: 'number'],
+  [label: 'GTB_CA', role: 'data', type: 'number'],
+  [label: 'GTB_PA', role: 'data', type: 'number']
+
+];
+*/
+
+  
+
+  
+  
+var calculateRF = function(image, year) { 
+  
+  
+  var training = image.select(bands2).mean().sampleRegions({
+    collection: laubnadelwald, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  
+  // ----------------------------------------------------------------------------------------
+  // classification algorithms (TC)
+  // ----------------------------------------------------------------------------------------
+  
+  // Make a Random Forest classifier and train it.
+  var classifierRF = ee.Classifier.smileRandomForest(5).train({
+    features: training, 
+    classProperty: 'Typ', 
+    inputProperties: bands2
+  });
+  // Classify the input imagery.
+  var classifiedRF = image.select(bands2).mean().classify(classifierRF);
+/*
+  // Define a palette for the  classification.
+  var palette = [
+    'green', // Laubwald (0)
+    'blue', // Nadelwald (1) 
+    'grey' // kein Wald (2)
+  ];
+  karte.addLayer(classifiedRF, {palette: palette, min: 0, max: 2}, 'Class'+year , true)
+  */
+  Export.image.toAsset({
+    image: classifiedRF.clip(wald_gesamt),
+    description: ('class_RF' + year),
+    region: rlp,
+    pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+  
+  
+  // ----------------------------------------------------------------------------------------
+  // Validierung
+  // ----------------------------------------------------------------------------------------
+
+  // übertrage LWI_Daten auf den classified-Layer
+  var testing = classifiedRF.sampleRegions({
+    collection: LWI_valid, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  var confusionMatrixRF = testing.errorMatrix('Typ', 'classification');
+  
+  return(confusionMatrixRF.accuracy());
+};
+
+var calculateCART = function(image, year) { 
+  
+  
+  var training = image.select(bands2).mean().sampleRegions({
+    collection: laubnadelwald, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  // Make a CART classifier and train it.
+  var classifierCart = ee.Classifier.smileCart().train({
+    features: training, 
+    classProperty: 'Typ', 
+    inputProperties: bands2
+  });
+  // Classify the input imagery.
+  var classifiedCart = image.select(bands2).mean().classify(classifierCart);
+  
+  Export.image.toAsset({
+    image: classifiedCart.clip(wald_gesamt),
+    description: ('class_Cart' + year),
+    region: rlp,
+    pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+  
+  // ----------------------------------------------------------------------------------------
+  // Validierung
+  // ----------------------------------------------------------------------------------------
+  
+  // übertrage LWI_Daten auf den classified-Layer
+  var testingCart = classifiedCart.sampleRegions({
+    collection: LWI_valid, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  var confusionMatrixCart = testingCart.errorMatrix('Typ', 'classification');
+  
+  return(confusionMatrixCart.accuracy());
+  
+};
+
+var calculateGTB = function(image, year) { 
+  
+  
+  var training = image.select(bands2).mean().sampleRegions({
+    collection: laubnadelwald, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  // Make a GTB classifier and train it.
+  var classifierGTB = ee.Classifier.smileGradientTreeBoost(5).train({
+    features: training, 
+    classProperty: 'Typ', 
+    inputProperties: bands2
+  });
+  
+  // Classify the input imagery.
+  var classifiedGTB = image.select(bands2).mean().classify(classifierGTB);
+  
+  Export.image.toAsset({
+    image: classifiedGTB.clip(wald_gesamt),
+    description: ('class_GTB' + year),
+    region: rlp,
+    pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+  
+  
+  // aendere Pixelwerte, damit 0 als nullValue verwendet werden kann
+  var new_image = classifiedGTB.clip(wald_gesamt).remap([0,1,2],[1,2,3]);
+  
+  Export.image.toDrive({
+    image: new_image,
+    description: ('class_GTB_TC' + year),
+    region: rlp,
+    //pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+  
+  // ----------------------------------------------------------------------------------------
+  // Validierung
+  // ----------------------------------------------------------------------------------------
+  
+  // übertrage LWI_Daten auf den classified-Layer
+  var testingGTB = classifiedGTB.sampleRegions({
+    collection: LWI_valid, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  var confusionMatrixGTB = testingGTB.errorMatrix('Typ', 'classification');
+  
+  return(confusionMatrixGTB.accuracy());
+  
+  
+};  
+/*
+
+// ----------------------------------------------------------------------------------------
+// Ergebnisse
+// ----------------------------------------------------------------------------------------
+
+// Define a palette for the  classification.
+var palette = [
+  'green', // Laubwald (0)
+  'blue', // Nadelwald (1) 
+  'grey' // kein Wald (2)
+];
+
+
+// Display the classification result and the input image.
+//karte.addLayer(classifiedRF, {min: 0, max: 2, palette: palette}, 'RF ' + year, false);
+//karte.addLayer(classifiedCart, {min: 0, max: 2, palette: palette}, 'Cart ' + year, false);
+//karte.addLayer(classifiedGTB, {min: 0, max: 2, palette: palette}, 'GTB ' + year, false);
+*/
+/*
+// Export the image
+var classifiedClip = classifiedRF.clipToCollection(wald_gesamt);
+Export.image.toAsset({
+  image: classifiedClip,
+  description: ('class' + year),
+  region: rlp,
+  pyramidingPolicy: {".default": "min"},
+  scale: 10, 
+  maxPixels: 1000000000
+});
+*/
+/*
+Export.image.toAsset({
+  image: s2masked,
+  description: ('s2_' + year),
+  region: rlp,
+  pyramidingPolicy: {".default": "min"},
+  scale: 10, 
+  maxPixels: 1000000000
+});
+*/
+
+
+
+
+/*
+// Gibt confusion matrix aus
+var confusionMatrixRF = testing.errorMatrix('Typ', 'classification');
+//print(year + ' RF + TC testing error matrix', confusionMatrixRF);
+print(year + ' RF + TC testing accuraccy', confusionMatrixRF.accuracy());
+print(year + ' RF + TC testing kappa', confusionMatrixRF.kappa());
+print(year + ' RF + TC testing CA', confusionMatrixRF.consumersAccuracy());
+print(year + ' RF + TC testing PA', confusionMatrixRF.producersAccuracy());
+
+// Gibt confusion matrix aus
+var confusionMatrixCart = testingCart.errorMatrix('Typ', 'classification');
+//print(year + ' Cart + TC testing error matrix', confusionMatrixCart);
+print(year + ' Cart + TC testing accuraccy', confusionMatrixCart.accuracy());
+print(year + ' Cart + TC testing kappa', confusionMatrixCart.kappa());
+print(year + ' Cart + TC testing CA', confusionMatrixCart.consumersAccuracy());
+print(year + ' Cart + TC testing PA', confusionMatrixCart.producersAccuracy());
+
+// Gibt confusion matrix aus
+var confusionMatrixGTB = testingGTB.errorMatrix('Typ', 'classification');
+//print(year + ' GTB + TC testing error matrix', confusionMatrixGTB);
+print(year + ' GTB + TC testing accuraccy', confusionMatrixGTB.accuracy());
+print(year + ' GTB + TC testing kappa', confusionMatrixGTB.kappa());
+print(year + ' GTB + TC testing CA', confusionMatrixGTB.consumersAccuracy());
+print(year + ' GTB + TC testing PA', confusionMatrixGTB.producersAccuracy());
+*/
+
+
+
+
+
+/*
+// Classification über alle Jahre hinweg, Füllen des dataTable für chart
+for (var i = 0; i < yearFile.length; i++){
+  calculateS2(yearFile[i].startDate, yearFile[i].endDate, yearFile[i].year);
+  
+}
+
+*/
+/*
+var dataTableRF = [
+  [dataTable[1][0], dataTable[2][0], dataTable[3][0], dataTable[4][0], dataTable[5][0]], 
+  [dataTable[1][1], dataTable[2][1], dataTable[3][1], dataTable[4][1], dataTable[5][1]], 
+  //[dataTable[1][2], dataTable[2][2], dataTable[3][2], dataTable[4][2], dataTable[5][2]], 
+  //[dataTable[1][3], dataTable[2][3], dataTable[3][3], dataTable[4][3], dataTable[5][3]]
+];
+
+var x = ee.List(ee.List(dataTableRF).get(0));
+var yRF = ee.List(ee.List(dataTableRF).get(1));
+//var yCart = ee.List(ee.List(dataTableRF).get(2));
+//var yGTB = ee.List(ee.List(dataTableRF).get(2));
+
+var chartRF = ui.Chart.array.values({array: yRF, axis: 0, xLabels: x}).setChartType('ColumnChart').setOptions({
+  title: 'Tasseled Cap/RF - overall accuracy', 
+  hAxis: {title: 'years'},
+  vAxis: {title: 'overall accuracy'},
+  legend: {position: 'none'}
+});
+hauptpanel.add(chartRF);
+
+var chartCART = ui.Chart.array.values({array: yCart, axis: 0, xLabels: x}).setChartType('ColumnChart').setOptions({
+  title: 'Tasseled Cap/CART - overall accuracy', 
+  hAxis: {title: 'years'},
+  vAxis: {title: 'overall accuracy'},
+  legend: {position: 'none'}
+});
+hauptpanel.add(chartCART);
+
+var chartGTB = ui.Chart.array.values({array: yGTB, axis: 0, xLabels: x}).setChartType('ColumnChart').setOptions({
+  title: 'Tasseled Cap/CART - overall accuracy', 
+  hAxis: {title: 'years'},
+  vAxis: {title: 'overall accuracy'},
+  legend: {position: 'none'}
+});
+hauptpanel.add(chartGTB);
+*/
+
+//print(dataTableRF[1][0]);
+/*
+fc.set({
+  years: yearsArray,
+  RF_OA: RF_OA,
+  //CART_OA: CART_OA,
+  //GTB_OA : GTB_OA
+});
+
+fc = fc.set('years', yearsArray,
+            'RF_OA', RF_OA
+            //'CART_OA', CART_OA, 
+            //'GTB_OA', GTB_OA
+            );
+print(fc);
+
+print()
+var x = fc.get('years');
+var y = fc.get('RF_OA');
+
+var chart = ui.Chart.array.values({array: y, axis: 1, xLabels: x}).setChartType('ColumnChart').setOptions({
+  title: 'Tasseled Cap/RF - overall accuracy', 
+  hAxis: {title: 'years'},
+  vAxis: {title: 'overall accuracy'},
+  legend: {position: 'none'}
+});
+
+
+*/
+
+
+
+// ----------------------------------------------------------------------------------------
+// NDVI
+// ----------------------------------------------------------------------------------------
+
+/*
+// Der Szene wird ein NDVI-Layer angehangen
+var calculateNDVI = function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return image.addBands(ndvi);
+};
+var s2ndvi = s2masked.map(addNDVI);
+karte.addLayer(s2ndvi.select('NDVI'), {min: -1, max: 1}, 'NDVI unclassified', false);
+
+
+// Select the band for training
+var bands1 = ['NDVI'];
+
+var training1 = s2ndvi.select(bands1).mean().sampleRegions({
+  collection: laubnadelwald, 
+  properties: ['Typ'], 
+  scale: 10 // Auflösung von Band 4 und 8: 10 m (im Gegensatz zu Bändern für TC)
+});
+
+
+// Make a Random Forest classifier and train it.
+var classifierNDVI = ee.Classifier.smileRandomForest(50).train({
+  features: training1, 
+  classProperty: 'Typ', 
+  inputProperties: bands1
+});
+
+// Classify the input imagery.
+var classifiedNDVI = s2ndvi.select(bands1).mean().classify(classifierNDVI);
+
+// Display the classification result and the input image.
+karte.addLayer(classifiedNDVI.clipToCollection(wald_gesamt), {min: 0, max: 1, palette: palette}, 'Forest Classification NDVI', false);
+
+// Get a confusion matrix representing resubstitution accuracy.
+//print('RF error matrix: ', classifierNDVI.confusionMatrix());
+//print('RF accuracy: ', classifierNDVI.confusionMatrix().accuracy());
+
+*/
