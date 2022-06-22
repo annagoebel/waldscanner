@@ -1,0 +1,189 @@
+
+// ----------------------------------------------------------------------------------------
+// Import FeatureCollections
+// ----------------------------------------------------------------------------------------
+
+var rlp = ee.FeatureCollection("projects/ee-annagoebel/assets/RLP");
+var gemeinden = ee.FeatureCollection("projects/ee-annagoebel/assets/Gemeinden");
+var fa = ee.FeatureCollection("projects/ee-annagoebel/assets/Forstaemter");
+var laubnadelwald = ee.FeatureCollection("projects/ee-annagoebel/assets/Reinbestand220509_1_5K");
+var wald_gesamt = ee.FeatureCollection("projects/ee-annagoebel/assets/ATKIS_wald");
+var LWI_valid = ee.FeatureCollection("projects/ee-annagoebel/assets/LWI_Reinbestand_3000");
+
+
+// ----------------------------------------------------------------------------------------
+// GUI
+// ----------------------------------------------------------------------------------------
+
+//clear root, add Map
+ui.root.clear();
+var karte = ui.Map();
+ui.root.add(karte);
+
+// Zoom auf RLP
+karte.centerObject(rlp, 8);
+
+var ndvi;
+var tc;
+var VI = {
+  'NDVI': ndvi,
+  'TC': tc
+};
+var selectVI = ui.Select({
+  style: {width: '480px'},
+  items: Object.keys(VI),
+  placeholder: 'Wählen Sie einen VI aus...',
+  
+});
+
+var rf;
+var cart;
+var gtb;
+var MLA = {
+  'RF': rf,
+  'CART': cart, 
+  'GTB': gtb
+};
+var selectMLA = ui.Select({
+  style: {width: '480px'},
+  items: Object.keys(MLA),
+  placeholder: 'Wählen Sie einen MLA aus...',
+  
+});
+
+var berechnen = ui.Button({
+  style: {width: '480px'},
+  label: "starte Auswertung"
+});
+
+var hauptpanel = ui.Panel({
+  widgets:[
+    ui.Label({value: 'Auswertung', style: {fontWeight: 'bold', fontSize: '20px'}}),
+    selectVI, 
+    selectMLA, 
+    berechnen
+  ],
+  
+  style: {width: '500px',  border: '1px solid black'}
+});
+
+// Definition der Zeitpunkte zum Filtern der S2 Szene
+var yearFile = [
+    {year:"2018", startDate:"2018-02-15", endDate:"2018-04-30"}, 
+    {year:"2019", startDate:"2019-02-15", endDate:"2019-04-30"}, 
+    {year:"2020", startDate:"2020-02-15", endDate:"2020-03-31"}, 
+    {year:"2021", startDate:"2021-03-15", endDate:"2021-03-31"}, 
+    {year:"2022", startDate:"2022-02-15", endDate:"2022-03-10"}, 
+];
+var nameVI;
+var nameMLA;
+
+// Auswahl des Features
+berechnen.onClick(function() {
+  // Classification über alle Jahre hinweg, Füllen des dataTable für chart
+  for (var i = 0; i < yearFile.length; i++){
+    
+    if (selectVI.getValue() == "NDVI"){
+      nameVI = "NDVI";
+    } else {
+      nameVI = "TC";
+    }
+    
+    if (selectMLA.getValue() == "RF"){
+      nameMLA = "RF";
+    } else if (selectMLA.getValue() == "CART"){
+      nameMLA = "Cart";
+    } else {
+      nameMLA = "GTB";
+    }
+    
+    var auswahlText = "projects/ee-annagoebel/assets/class_" + nameMLA + "_" + nameVI + yearFile[i].year;
+    var auswahl = ee.Image(auswahlText);
+    // Define a palette for the  classification.
+    var palette = [
+      'green', // Laubwald (0)
+      'blue', // Nadelwald (1) 
+      'grey' // kein Wald (2)
+    ];
+    
+    
+    // Display the classification result and the input image.
+    karte.addLayer(auswahl, {min: 0, max: 2, palette: palette}, nameMLA + ' ' + nameVI + ' ' + yearFile[i].year, false);
+
+    var result_OA = validate(auswahl, yearFile[i].year, nameMLA, nameVI);
+      
+    // print table 
+    dataTable[i+1] = [
+      yearFile[i].year,
+      result_OA
+    ];
+  }
+  
+  var dataTableNew = [
+    [dataTable[1][0], dataTable[2][0], dataTable[3][0], dataTable[4][0], dataTable[5][0]], 
+    [dataTable[1][1], dataTable[2][1], dataTable[3][1], dataTable[4][1], dataTable[5][1]], 
+  ];
+
+  var x = ee.List(ee.List(dataTableNew).get(0));
+  var y = ee.List(ee.List(dataTableNew).get(1));
+  //var yCart = ee.List(ee.List(dataTableRF).get(2));
+  //var yGTB = ee.List(ee.List(dataTableRF).get(2));
+  
+  var chart = ui.Chart.array.values({array: y, axis: 0, xLabels: x}).setChartType('ColumnChart').setOptions({
+    title: nameVI + " / " + nameMLA, 
+    hAxis: {title: 'years'},
+    vAxis: {title: 'producers accuracy'},
+    legend: {position: 'none'}
+  });
+  hauptpanel.add(chart);
+  
+});
+
+ui.root.add(hauptpanel);
+
+
+// definition dataTable
+var dataTable = [
+  [{label: 'Jahr', role: 'domain', type: 'string'}, 
+  {label: 'OA', role: 'data', type: 'number'}]
+
+];
+
+
+//implementation array for rlp featureCollection properties
+var fc = ee.FeatureCollection([]);
+var yearsArray = [];
+var OA = [];
+
+var validate = function(image, year, vi, mla){
+  
+  // ----------------------------------------------------------------------------------------
+  // Validierung
+  // ----------------------------------------------------------------------------------------
+
+  // übertrage LWI_Daten auf den classified-Layer
+  var testing = image.sampleRegions({
+    collection: LWI_valid, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  var confusionMatrix = testing.errorMatrix('Typ', 'classification');
+  
+  // gebe confusionMatrix aus
+  var exportAccuracy = ee.Feature(null, {matrix: confusionMatrix.getInfo()});
+  Export.table.toDrive({
+    collection: ee.FeatureCollection(exportAccuracy),
+    description: vi + '_' + mla + '_' + year,
+    fileFormat: 'CSV'
+  });
+  print(year);
+  print(confusionMatrix);
+  
+  return(confusionMatrix.kappa());
+};
+
+
+  
+
+ 
