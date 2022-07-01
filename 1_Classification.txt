@@ -1,0 +1,370 @@
+// ----------------------------------------------------------------------------------------
+// 
+// Masterthesis Anna Göbel
+// anna.goebel@posteo.de
+//
+// Skript 1/3
+// Klassifizierungsskript
+//
+// Dieses Skript klassifiziert die S2-Daten je nach Eingabe des VI und MLA
+// und bietet die Möglichkeit, das Ergebnis als Asset oder in Google Drive zu speichern
+// Speicherung als Asset: Einbindung der Ergebnisse im Validierungsskript
+// Speicherung in Drive: Download der Rasterdaten
+//
+// ----------------------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------------------
+// Import FeatureCollections
+// ----------------------------------------------------------------------------------------
+
+// hier Links austauschen ------------------->
+// Grenze RLP
+var rlp = ee.FeatureCollection("projects/ee-annagoebel/assets/RLP");
+// Trainingsdatensatz
+var laubnadelwald = ee.FeatureCollection("projects/ee-annagoebel/assets/Reinbestand220509_1_5K");
+// ATKIS-Wälder zum Clippen
+var wald_gesamt = ee.FeatureCollection("projects/ee-annagoebel/assets/ATKIS_wald");
+
+
+// ----------------------------------------------------------------------------------------
+// GUI
+// ----------------------------------------------------------------------------------------
+
+// clear root, füge Map hinzu
+ui.root.clear();
+var karte = ui.Map();
+ui.root.add(karte);
+
+// Zoom auf RLP
+karte.centerObject(rlp, 8);
+    
+// definiere Variablen für NDVI und TC
+var ndvi;
+var tc;
+var VI = {
+  'NDVI': ndvi,
+  'TC': tc
+};
+
+// selector für VI
+var selectVI = ui.Select({
+  style: {width: '480px'},
+  items: Object.keys(VI),
+  placeholder: 'Wählen Sie einen VI aus...',
+});
+
+// definiere Variablen für Machine Learning Algorithmen (MLA)
+var rf;
+var cart;
+var gtb;
+var MLA = {
+  'RF': rf,
+  'CART': cart, 
+  'GTB': gtb
+};
+
+// selector für MLA
+var selectMLA = ui.Select({
+  style: {width: '480px'},
+  items: Object.keys(MLA),
+  placeholder: 'Wählen Sie einen MLA aus...',
+});
+
+// Button starte Auswertung
+var berechnen = ui.Button({
+  style: {width: '480px'},
+  label: "starte Auswertung"
+});
+
+// Hauptpanel
+var hauptpanel = ui.Panel({
+  widgets:[
+    ui.Label({value: 'Auswertung', style: {fontWeight: 'bold', fontSize: '20px'}}),
+    selectVI, 
+    selectMLA, 
+    berechnen,
+    ui.Label({value:"Ausgabe der OA nicht möglich (user memory exceeded) -> Ergebnis über Tasks als Asset speichern und ausführliche Validierung über Validierungsskript ausführen"}),
+    ui.Label({value:"Im Validierungsskript werden die Assets dann wieder eingeladen. Grund: Auslagerung der Rechenleistung in Batch-Prozess"}),
+    ui.Label({value:"Mithilfe dieses Tools kann das Ergebnis als Asset oder in Google Drive gespeichert werden. Die Darstellung in der Map ist zwar implementiert, aber ob sie funktioniert, ist tagesformabhängig."})
+  ],
+  style: {width: '500px',  border: '1px solid black'}
+});
+
+// Definition der Zeitpunkte zum Filtern der S2 Szene
+var yearFile = [
+    {year:"2018", startDate:"2018-02-15", endDate:"2018-04-30"}, 
+    {year:"2019", startDate:"2019-02-15", endDate:"2019-04-30"}, 
+    {year:"2020", startDate:"2020-02-15", endDate:"2020-03-31"}, 
+    {year:"2021", startDate:"2021-03-15", endDate:"2021-03-31"}, 
+    {year:"2022", startDate:"2022-02-15", endDate:"2022-03-10"}, 
+];
+
+// definiere Variablen
+var img;
+var img2;
+var nameVI;
+var nameMLA;
+var bands;
+
+// Auswahl des Features
+berechnen.onClick(function() {
+  // Klassifikation über alle Jahre hinweg
+  for (var i = 0; i < yearFile.length; i++){
+    // Abfrage der selctors
+    if (selectVI.getValue() == "NDVI"){
+      bands = ['NDVI']; 
+      nameVI = "NDVI";
+      img = calculateS2(yearFile[i].startDate, yearFile[i].endDate, yearFile[i].year);
+      img2 = img.map(calculateNDVI);
+    } else {
+      bands = ['brightness','greenness', 'wetness'];
+      nameVI = "Tasseled Cap";
+      img = calculateS2(yearFile[i].startDate, yearFile[i].endDate, yearFile[i].year);
+      img2 = img.map(calculateTC);
+    }
+    
+    if (selectMLA.getValue() == "RF"){
+      nameMLA = "Random Forest";
+      calculateRF(img2, yearFile[i].year);
+
+    } else if (selectMLA.getValue() == "CART"){
+      nameMLA = "Classification and Regression Trees";
+      calculateCART(img2, yearFile[i].year);
+    } else {
+      nameMLA = "Gradient Tree Boost";
+      calculateGTB(img2, yearFile[i].year);
+    }
+    
+    
+  }
+  
+});
+ui.root.add(hauptpanel);
+
+
+// ----------------------------------------------------------------------------------------
+// Sentinel-2 ImageCollections
+// ----------------------------------------------------------------------------------------
+
+function calculateS2 (startDate, endDate, year) {
+  
+  // Definiere Sentinel ImageCollection
+  var bands = ['B2', 'B3', 'B4','B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12', 'SCL'];
+  
+  var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
+            .filterDate(startDate, endDate)
+            .filterBounds(rlp)
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',40))
+            .select(bands)
+            .map(function(image){return image.clipToCollection(rlp)});
+  
+  // ----------------------------------------------------------------------------------------
+  // Wolkenmaske
+  // ----------------------------------------------------------------------------------------
+  
+  function maskCloudAndShadowsS2(image) {
+    var scl = image.select('SCL'); 
+      var darkArea = scl.eq(2);
+      var shadow = scl.eq(3); // 3 = Wolkenschatten
+      var cloudsLowProbability =  scl.eq(7); //
+      var cloudsMediumProbability =  scl.eq(8); //
+      var cloudsHighProbability =  scl.eq(9); //
+      var cirrus = scl.eq(10); // 10 = Cirrus
+      var SnowIce = scl.eq(11);
+    var mask = (darkArea.neq(1)).and(shadow.neq(1)).and(cloudsLowProbability.neq(1))
+      .and(cloudsMediumProbability.neq(1)).and(cloudsHighProbability.neq(1)).and(cirrus.neq(1))
+      .and(SnowIce.neq(1));
+    return image.updateMask(mask);
+  }
+  
+  var s2masked = s2.map(maskCloudAndShadowsS2);
+  return s2masked;
+}  
+  
+
+// Berechnung tasseled cap
+var calculateTC = function (image){
+  var b = image.select("B2", "B3", "B4", "B8A", "B11", "B12");
+  var brightness_coefficents= ee.Image([0.3037, 0.2793, 0.4743, 0.5585, 0.5082, 0.1863]);
+  var greenness_coefficents= ee.Image([-0.2848, -0.2435, -0.5436, 0.7243, 0.0840, -0.1800]);
+  var wetness_coefficents= ee.Image([0.1509, 0.1973, 0.3279, 0.3406, -0.7112, -0.4572]);
+  
+  var brightness = image.expression(
+    '(B * BRIGHTNESS)',
+    {'B':b, 'BRIGHTNESS': brightness_coefficents}
+  );
+  var greenness = image.expression(
+    '(B * GREENNESS)',
+    {'B':b, 'GREENNESS': greenness_coefficents}
+  );
+  var wetness = image.expression(
+    '(B * WETNESS)',
+    {'B':b, 'WETNESS': wetness_coefficents}
+  );
+  
+  brightness = brightness.reduce(ee.call("Reducer.sum"));
+  greenness = greenness.reduce(ee.call("Reducer.sum"));
+  wetness = wetness.reduce(ee.call("Reducer.sum"));
+    
+  var tasseled_cap = ee.Image(brightness).addBands(greenness).addBands(wetness).rename('brightness','greenness','wetness');
+  
+  return tasseled_cap;
+};
+
+
+// Berechnung NDVI
+var calculateNDVI = function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return image.addBands(ndvi);
+};
+
+  
+var calculateRF = function(image, year) { 
+
+  var training = image.select(bands).mean().sampleRegions({
+    collection: laubnadelwald, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  
+  // ----------------------------------------------------------------------------------------
+  // classification algorithms (TC)
+  // ----------------------------------------------------------------------------------------
+  
+  // Make a Random Forest classifier and train it.
+  var classifierRF = ee.Classifier.smileRandomForest(5).train({ // <------- Anzahl Entscheidungsbäume
+    features: training, 
+    classProperty: 'Typ', 
+    inputProperties: bands
+  });
+  // Classify the input imagery.
+  var classifiedRF = image.select(bands).mean().classify(classifierRF);
+
+  // Define a palette for the  classification.
+  var palette = [
+    'green', // Laubwald (0)
+    'blue', // Nadelwald (1) 
+    'grey' // kein Wald (2)
+  ];
+  karte.addLayer(classifiedRF.clipToCollection(wald_gesamt), {palette: palette, min: 0, max: 2}, 'Classification '+ selectVI.getValue() + '_' + selectMLA.getValue() + '_' + year, true);
+  
+  Export.image.toAsset({
+    image: classifiedRF.clip(wald_gesamt),
+    description: ('asset_class_' + selectVI.getValue() + '_' + selectMLA.getValue() + '_' + year),
+    region: rlp,
+    pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+  
+  // aendere Pixelwerte, damit 0 als nullValue verwendet werden kann
+  var new_image = classifiedRF.clip(wald_gesamt).remap([0,1,2],[1,2,3]);
+  
+  Export.image.toDrive({
+    image: new_image,
+    description: ('drive_class_' + selectVI.getValue() + '_' + selectMLA.getValue() + '_' + year),
+    region: rlp,
+    //pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+  
+};
+
+var calculateCART = function(image, year) { 
+  
+  
+  var training = image.select(bands).mean().sampleRegions({
+    collection: laubnadelwald, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  // Make a CART classifier and train it.
+  var classifierCart = ee.Classifier.smileCart().train({
+    features: training, 
+    classProperty: 'Typ', 
+    inputProperties: bands
+  });
+  // Classify the input imagery.
+  var classifiedCart = image.select(bands).mean().classify(classifierCart);
+  
+  // Define a palette for the  classification.
+  var palette = [
+    'green', // Laubwald (0)
+    'blue', // Nadelwald (1) 
+    'grey' // kein Wald (2)
+  ];
+  karte.addLayer(classifiedCart, {palette: palette, min: 0, max: 2}, 'Classification '+ selectVI.getValue() + '_' + selectMLA.getValue() + '_' + year, true);
+  
+  Export.image.toAsset({
+    image: classifiedCart.clip(wald_gesamt),
+    description: ('asset_class_' + selectVI.getValue() + '_' + selectMLA.getValue() + '_' + year),
+    region: rlp,
+    pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+  
+  // aendere Pixelwerte, damit 0 als nullValue verwendet werden kann
+  var new_image = classifiedCart.clip(wald_gesamt).remap([0,1,2],[1,2,3]);
+  
+  Export.image.toDrive({
+    image: new_image,
+    description: ('drive_class_' + selectVI.getValue() + '_' + selectMLA.getValue() + '_' + year),
+    region: rlp,
+    //pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+  
+};
+
+var calculateGTB = function(image, year) { 
+  var training = image.select(bands).mean().sampleRegions({
+    collection: laubnadelwald, 
+    properties: ['Typ'], 
+    scale: 10
+  });
+  
+  // Make a GTB classifier and train it.
+  var classifierGTB = ee.Classifier.smileGradientTreeBoost(5).train({ // <------- Anzahl Entscheidungsbäume
+    features: training, 
+    classProperty: 'Typ', 
+    inputProperties: bands
+  });
+  
+  // Classify the input imagery.
+  var classifiedGTB = image.select(bands).mean().classify(classifierGTB);
+  
+  // Define a palette for the  classification.
+  var palette = [
+    'green', // Laubwald (0)
+    'blue', // Nadelwald (1) 
+    'grey' // kein Wald (2)
+  ];
+  karte.addLayer(classifiedGTB, {palette: palette, min: 0, max: 2}, 'Classification '+ selectVI.getValue() + '_' + selectMLA.getValue() + '_' + year, true);
+  
+  Export.image.toAsset({
+    image: classifiedGTB.clip(wald_gesamt),
+    description: ('asset_class_' + selectVI.getValue() + '_' + selectMLA.getValue() + '_' + year),
+    region: rlp,
+    pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+  
+  
+  // aendere Pixelwerte, damit 0 als nullValue verwendet werden kann
+  var new_image = classifiedGTB.clip(wald_gesamt).remap([0,1,2],[1,2,3]);
+  
+  Export.image.toDrive({
+    image: new_image,
+    description: ('drive_class_' + selectVI.getValue() + '_' + selectMLA.getValue() + '_' + year),
+    region: rlp,
+    //pyramidingPolicy: {".default": "min"},
+    scale: 10, 
+    maxPixels: 1000000000
+  });
+};  
