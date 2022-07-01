@@ -1,0 +1,394 @@
+// ----------------------------------------------------------------------------------------
+// 
+// Masterthesis Anna Göbel
+// anna.goebel@posteo.de
+//
+// Skript 3/3
+// Hauptskript GUI
+//
+// Dieses Skript implementiert die GUI.
+// Die Ergebnisse des Klassifizierungsskripts werden aus den Assets eingeladen.
+// Änderung der Auswahl der Kombination in Zeile 251 (momentan GTB + TC)
+//
+//
+// ----------------------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------------------
+// Import FeatureCollections
+// ----------------------------------------------------------------------------------------
+
+// hier Links austauschen ------------------->
+// Grenze RLP
+var rlp = ee.FeatureCollection("projects/ee-annagoebel/assets/RLP");
+// Gemeindegrenzen
+var gemeinden = ee.FeatureCollection("projects/ee-annagoebel/assets/Gemeinden");
+// Forstamtsgrenzen
+var fa = ee.FeatureCollection("projects/ee-annagoebel/assets/Forstaemter");
+// ATKIS-Wälder zum Clippen
+var wald_gesamt = ee.FeatureCollection("projects/ee-annagoebel/assets/ATKIS_wald");
+
+// ----------------------------------------------------------------------------------------
+// GUI
+// ----------------------------------------------------------------------------------------
+
+// clear root, add Map
+ui.root.clear();
+var karte = ui.Map();
+ui.root.add(karte);
+
+
+// Zoom auf RLP
+karte.centerObject(rlp, 8);
+
+// definiere drawingTools zum Zeichnen eines eigenen Polygons
+var drawingTools = karte.drawingTools();
+
+
+//Hinzufügen der FeatureCollections zur Karte
+//Gemeinden
+var empty_gem = ee.Image().byte();
+var outline_gem = empty_gem.paint({
+  featureCollection: gemeinden,
+  color: 1,
+  width: 1
+});
+karte.addLayer(outline_gem, {palette: '000000'}, "Gemeindegrenzen", false);
+
+//Forstämter
+var empty_fa = ee.Image().byte();
+var outline_fa = empty_fa.paint({
+  featureCollection: fa,
+  color: 1,
+  width: 1.5
+});
+karte.addLayer(outline_fa, {palette: '006600'}, "Forstamtsgrenzen", false);
+
+//RLP
+var empty_rlp = ee.Image().byte();
+var outline_rlp = empty_rlp.paint({
+  featureCollection: rlp,
+  color: 1,
+  width: 2
+});
+karte.addLayer(outline_rlp, {palette: 'FF0000'}, "Bundeslandgrenze (RLP)");
+
+
+var polygon;
+
+// definiere Ebenen für select-Button
+var ebenen = {
+  'eigenes Polygon zeichnen': polygon,
+  'Gemeinde': gemeinden,
+  'Forstamt (nicht empfohlen)': fa,
+};
+
+var ebene;
+
+// inspector-Panel definieren
+var selectText; 
+var inspector = ui.Panel([ui.Label(selectText)]);
+
+// select-Button zur Auswahl der Ebene/"Kategorie"
+var select = ui.Select({
+  style: {width: '480px'},
+  items: Object.keys(ebenen),
+  placeholder: 'Wählen Sie eine Kategorie aus...',
+  onChange: function(key) {
+    
+    //Layer ausschalten
+    karte.layers().get(1).setShown(false);
+    karte.layers().get(0).setShown(false);
+    
+    // bei Auswahl: ändere drawing Tools + Layerdarstellung + wähle Ebene aus
+    if (select.getValue() == 'Gemeinde'){
+      karte.layers().get(0).setShown(true);
+      selectText = "Wählen Sie eine Gemeinde aus";
+      waehlePunkt();
+      ebene = gemeinden;
+    }
+    else if (select.getValue() == 'eigenes Polygon zeichnen'){
+      drawingTools.clear();
+      drawingTools.setDrawModes(['polygon']);
+      drawingTools.addLayer([]);
+      drawingTools.setShape('polygon');
+      drawingTools.draw();
+      ebene = polygon;
+    }
+    else if (select.getValue() == 'Forstamt (nicht empfohlen)'){ //nicht empfohlen weil zu groß
+      karte.layers().get(1).setShown(true);
+      selectText = "Wählen Sie ein Forstamt aus";
+      waehlePunkt();
+      ebene = fa;
+    }
+    
+    // Gemeinden und Forstämter werden über Punkte angewählt
+    function waehlePunkt(){
+      drawingTools.clear();
+      drawingTools.setDrawModes(['point']);
+      drawingTools.addLayer([]);
+      drawingTools.setShape('point');
+      drawingTools.draw();
+    }
+    
+    // zeige Bezeichnung Gemeinde/Forstamt/eigenes Polygon im oberen Panel an
+    karte.remove(inspector);
+    inspector = ui.Panel([ui.Label(selectText)]);
+    karte.add(inspector);
+  }
+});
+
+// starte Auswertung - Button
+var berechnen = ui.Button({
+  style: {width: '480px'},
+  label: "starte Auswertung"
+});
+
+// Hauptpanel zur Konfiguration
+var hauptpanel = ui.Panel({
+  widgets:[
+    ui.Label({value: 'Konfiguration', style: {fontWeight: 'bold', fontSize: '20px'}}),
+    ui.Label('Dieses Tool dient dem zeitreihenbasierten Waldmonitoring in Rheinland-Pfalz. Es wird für jedes Jahr (2018-2022) die Fläche von Laub- Nadel- und Nicht-Wald berechnet und als Zeitreihe ausgegeben. Die Auswertung erfolgt auf Basis des von Ihnen ausgewählten Polygons. Achtung: je größer die ausgewählte Fläche, desto länger dauert die Auswertung.'),
+    ui.Label('1. Kategorie auswählen '),
+    select,
+    ui.Label('2. Fläche auswählen bzw. eigene Fläche im Kartenausschnitt zeichnen (zoomen mit + und - links im Kartenausschnitt oder Suche nach Ort in der Suchleiste oben)'),
+    ui.Label('   <---'),
+    ui.Label('3. Auswertung starten:'),
+    berechnen,
+    ui.Label('4. Geduld - ich bin gleich soweit :-)'),
+    ui.Label(''),
+    ui.Label(''),
+    ui.Label(''),
+    ui.Label(''),
+    ui.Label(''),
+    ui.Label(''),
+    ui.Label(''),
+    ui.Label({value: "last change: 10.06.2022", style: { fontSize: '10px'}}),
+    ui.Label({value: "master thesis: GUI for time series based monitoring of (private) forests in Rhineland-Palatinate", style: { fontSize: '10px'}}),
+    ui.Label({value: "Paris Lodron Universität Salzburg / Universität Trier", style: { fontSize: '10px'}}),
+    ui.Label({value: "author: Anna Göbel (anna.goebel@posteo.de)", style: { fontSize: '10px'}}),
+  ],
+  
+  style: {width: '500px',  border: '1px solid black'}
+});
+ui.root.add(hauptpanel);
+
+// Auswertungspanel
+var auswertungspanel = ui.Panel({
+  widgets:[ ],
+  style: {width: '500px',  border: '1px solid black'}
+});
+
+
+// Start der Auswertung 
+berechnen.onClick(function() {
+  karte.setOptions("HYBRID");
+  // Definiere FeatureCollection mit den Koordinaten des Punkts
+  var auswahl = drawingTools.layers().get(0).getEeObject();
+  var spatialJoined;
+  
+  if (select.getValue() == "eigenes Polygon zeichnen"){
+    drawingTools.setShown(true);
+    spatialJoined = auswahl;
+  }
+  else {
+    // Spatial Join mit Punkt als Input und Ebene (Gemeinden/Forstamt)
+    var distFilter = ee.Filter.withinDistance({
+      distance: 0,
+      leftField: '.geo',
+      rightField: '.geo',
+      maxError: 10
+    });
+    var distSaveAll = ee.Join.saveAll({
+      matchesKey: 'points',
+      measureKey: 'distance'
+    });
+
+    // spatial join des geklickten Punktes mit dem Objekt
+    spatialJoined = distSaveAll.apply(ebene, auswahl, distFilter);
+  }
+  
+  drawingTools.clear();
+  // auf ausgewähltes Objekt zoomen
+  karte.centerObject(spatialJoined);
+  // Panel entfernen nachdem Gemeinde ausgewählt wurde
+  karte.remove(inspector);
+  
+  // Bezeichnung Gemeinde/Forstamt im Panel einfügen
+  var gemText;
+  if (select.getValue() == 'Forstamt (nicht empfohlen)'){
+    gemText = spatialJoined.first().getString('FA_REF_NAM').getInfo();
+    // Text aus properties in Panel einfügen
+    inspector = ui.Panel([ui.Label(gemText)]);
+    karte.add(inspector);
+  } else if (select.getValue() == 'Gemeinde'){
+    gemText = spatialJoined.first().getString('bez').getInfo() + " " + spatialJoined.first().getString('gen').getInfo();
+    // Text aus properties in Panel einfügen
+    inspector = ui.Panel([ui.Label(gemText)]);
+    karte.add(inspector);
+  } else if (select.getValue() == 'eigenes Polygon zeichnen'){
+    gemText = "eigenes Polygon";
+  }
+ 
+  // Definition der Zeitpunkte zum Filtern der S2 Szene
+  var yearFile = [
+    {year:"2018", startDate:"2018-02-15", endDate:"2018-04-30"}, 
+    {year:"2019", startDate:"2019-02-15", endDate:"2019-04-30"}, 
+    {year:"2020", startDate:"2020-02-15", endDate:"2020-03-31"}, 
+    {year:"2021", startDate:"2021-03-15", endDate:"2021-03-31"}, 
+    {year:"2022", startDate:"2022-02-15", endDate:"2022-03-10"}, 
+  ];
+  
+  // Implementierung des dataTables für chart
+  var dataTable = [
+    [{label: 'Jahr', role: 'domain', type: 'string'},
+      {label: 'Laubwald', role: 'data', type: 'number'},
+      {label: 'Nadelwald', role: 'data', type: 'number'},
+      {label: 'kein Wald', role: 'data', type: 'number'}]
+  ];
+  
+  // Funktion zum Einladen der klassifizierten Rasterdaten aus den Assets
+  function loadClassification (year) {
+    var file = "projects/ee-annagoebel/assets/asset_class_TC_GTB_" + year; // hier die Bezeichnung des gewünschten Assets eintragen (momentan wird bestes Ergebnis eingeladen - GTB/TC)
+    return ee.Image(file);
+  }
+  
+  // Laden der Classification über alle Jahre hinweg, Füllen des dataTable für chart
+  for (var i = 0; i < yearFile.length; i++){
+    // load classification, clip auf ausgewähltes Polygon
+    var classified = loadClassification(yearFile[i].year).clipToCollection(ee.FeatureCollection(spatialJoined));
+   
+    // Aufruf Funktion berechne Flächengröße
+    var result = calculateArea(classified, yearFile[i].year);
+    
+    // Runden und in km2 umrechnen
+    var resultLaub = result.getNumber('0').divide(ee.Number(1000)).round().divide(ee.Number(1000)).getInfo();
+    var resultNadel = result.getNumber('1').divide(ee.Number(1000)).round().divide(ee.Number(1000)).getInfo();
+    var resultKein = result.getNumber('2').divide(ee.Number(1000)).round().divide(ee.Number(1000)).getInfo();
+    
+    // Summe
+    var resultSum = (resultLaub + resultNadel + resultKein);
+    
+    //Füllen des dataTable
+    dataTable[(i+1)] = [
+      yearFile[i].year, 
+      resultLaub, 
+      resultNadel,
+      resultKein
+    ];
+    
+    // definiere Palette zur Darstellung
+    var palette = [
+      'green', // Laubwald (0)
+      'blue', // Nadelwald (1)  
+      'grey' // kein Wald (2)
+    ];
+    
+    // Definiere Sentinel ImageCollection
+    var bands = ['B2', 'B3', 'B4'];
+    
+    var s2 = ee.ImageCollection('COPERNICUS/S2_SR')
+              .filterDate(yearFile[i].startDate, yearFile[i].endDate)
+              .filterBounds(rlp)
+              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',40))
+              .select(bands)
+              .map(function(image){return image.clip(rlp)});
+    
+    
+    // Funktion, um Layer zu löschen, wenn bereits vorhanden
+    var removeLayer = function(name) {
+      var layers = karte.layers();
+      // list of layers names
+      var names = [];
+      layers.forEach(function(lay) {
+        var lay_name = lay.getName();
+        names.push(lay_name);
+      });
+      // get index
+      var index = names.indexOf(name);
+      if (index > -1) {
+        // if name in names
+        var layer = layers.get(index);
+        karte.remove(layer);
+      }
+    }; 
+    
+    var layername = 'Classification ' + yearFile[i].year;
+    removeLayer(layername);
+    if (i < yearFile.length - 1){
+      karte.addLayer(classified, {min: 0, max: 2, palette: palette}, (layername), false);
+    } else {
+      karte.addLayer(classified, {min: 0, max: 2, palette: palette}, (layername), true);
+    }
+    
+  }
+  
+  // erstelle Diagramm
+  var chart = ui.Chart(dataTable).setChartType('LineChart').setOptions({
+    title: ('Zeitreihe ' + gemText),
+    hAxis: {title: 'Jahr', titleTextStyle: {italic: false, bold: true}},
+    vAxis: {title: 'Flächengröße in km²', titleTextStyle: {italic: false, bold: true}},
+    colors: ['green', 'blue', 'grey']
+  });
+  
+  // entferne Hauptpanel, füge Auswertungspanel hinzu
+  ui.root.remove(hauptpanel);
+  ui.root.add(auswertungspanel);
+  auswertungspanel.clear();
+  auswertungspanel.add(ui.Label({value: 'Auswertung', style: {fontWeight: 'bold', fontSize: '18px'}}));
+  auswertungspanel.add(ui.Label({value: 'Die Flächengrößen pro Jahr werden angezeigt, wenn Sie mit der Maus über den Graphen fahren. Durch einen Klick auf den Button oben rechts wird der Graph in einem neuen Fenster geöffnet.'}));
+  auswertungspanel.add(ui.Label({value: 'Bitte beachten Sie, dass kleine Abweichungen in der Zeitreihe auch auf fehlerhafte Daten (z.B. hohe Wolkenbedeckung) zurückzuführen sein können.'}));
+  auswertungspanel.add(ui.Label({value: 'Unter "Layers" kann zwischen den Klassifikationsergebnissen der letzten Jahre umgeschaltet werden. Über den Schiebebalken jeweils rechts neben Layern kann die Transparenz geändert werden'}));
+  auswertungspanel.add(ui.Label({value: 'Gesamtfläche Laub-, Nadel-, kein Wald: ' + resultSum.toString().replace('.', ',').slice(0,6) + " km²"}));
+  auswertungspanel.add(chart);
+  
+  // reset button
+  var neu = ui.Button({
+    style: {width: '480px'},
+    label: "neue Anfrage"
+  });
+  auswertungspanel.add(neu);
+  
+  // reset zu ursprüngliche Ansicht
+  neu.onClick(function() {
+    karte.remove(inspector);
+    karte.setOptions("ROADMAP");
+    ui.root.remove(auswertungspanel);
+    ui.root.add(hauptpanel);
+    drawingTools.clear();
+    drawingTools.draw();
+  });
+  
+  //berechne Flächengrößen
+  function calculateArea (img, year){
+    
+    var waldClip = img.reduceToVectors({
+      geometry: spatialJoined,
+      scale: 10
+    });
+  
+    // Berechne Flächengröße jeder Klasse in m2 
+    var areaImage = ee.Image.pixelArea().addBands(img);
+    var areas = areaImage.reduceRegion({ //areas: ee.Dictionary
+      reducer: ee.Reducer.sum().group({
+        groupField: 1,
+        groupName: 'class',
+      }),
+      geometry: waldClip.geometry(),
+      scale: 10,
+      maxPixels: 1e13,
+      tileScale: 8
+    });
+    
+    var classAreas = ee.List(areas.get('groups'));
+    var classAreaLists = classAreas.map(function(item) {
+      var areaDict = ee.Dictionary(item);
+      var classNumber = ee.Number(areaDict.get('class')).format();
+      var area = ee.Number(areaDict.get('sum'));
+      return ee.List([classNumber, area]);
+    });
+     
+    var result = ee.Dictionary(classAreaLists.flatten());
+    
+    return(result);
+  }
+});
